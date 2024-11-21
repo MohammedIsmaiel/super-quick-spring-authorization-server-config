@@ -123,13 +123,14 @@ class SecurityConfig {
                 .authorizeHttpRequests(authorize -> authorize
                         .requestMatchers("/error", "/assets/**", "/logout").permitAll()
                         .requestMatchers("/login/**").anonymous()
+                        .requestMatchers("/ott", "/verify-ott").hasAnyAuthority("PARTIAL_AUTH_T")
                         .requestMatchers("/otp", "/verify-otp").hasAnyAuthority("PARTIAL_AUTH")
                         .anyRequest().hasAnyAuthority("ROLE_USER"))
                 .formLogin(form -> form
                         .loginPage("/login")
                         .loginProcessingUrl("/login")
                         .successHandler((request, response, authentication) -> {
-                            response.sendRedirect("/otp");
+                            response.sendRedirect("/ott");
                         })
                         .failureHandler((request, response, exception) -> {
                             response.sendRedirect("/login?error");
@@ -249,7 +250,7 @@ class UsernamePasswordAuthenticationProvider implements AuthenticationProvider {
             return new UsernamePasswordAuthenticationToken(
                     username,
                     password,
-                    Collections.singleton(new SimpleGrantedAuthority("PARTIAL_AUTH")));
+                    Collections.singleton(new SimpleGrantedAuthority("PARTIAL_AUTH_T")));
         }
         throw new BadCredentialsException("Invalid credentials");
     }
@@ -292,6 +293,38 @@ class OtpAuthenticationProvider implements AuthenticationProvider {
     }
 }
 
+@Component
+@AllArgsConstructor
+class OttAuthenticationProvider implements AuthenticationProvider {
+    private UserDetailsService userDetailsService;
+
+    @Override
+    public Authentication authenticate(Authentication authentication) throws AuthenticationException {
+        String username = authentication.getName();
+        String otp = authentication.getCredentials().toString();
+        System.out.println("OTP Authentication attempt for user: " + username);
+        if (otp.equals("123")) {
+            UserDetails user = userDetailsService.loadUserByUsername(username);
+            // Create a new authentication with the FULL user authorities
+            Authentication fullAuth = new UsernamePasswordAuthenticationToken(
+                    user, // Use the full UserDetails object as principal
+                    null, // credentials can be null after authentication
+                    List.of(new SimpleGrantedAuthority("PARTIAL_AUTH")) // Use the original user authorities
+                                                                        // (ROLE_USER, etc.)
+            );
+            System.out.println("OTP Validation successful. New authorities: " + fullAuth.getAuthorities());
+            return fullAuth;
+        }
+        System.out.println("OTP Validation failed");
+        throw new BadCredentialsException("Invalid OTT");
+    }
+
+    @Override
+    public boolean supports(Class<?> authentication) {
+        return UsernamePasswordAuthenticationToken.class.isAssignableFrom(authentication);
+    }
+}
+
 @RestController
 class DemoController {
     @GetMapping("/test")
@@ -309,6 +342,7 @@ class DemoController {
 @AllArgsConstructor
 class AuthController {
     private OtpAuthenticationProvider otpAuthenticationProvider;
+    private OttAuthenticationProvider ottAuthenticationProvider;
     private final HttpSessionRequestCache requestCache = new HttpSessionRequestCache();
 
     @GetMapping("/login")
@@ -324,6 +358,16 @@ class AuthController {
             return "redirect:/login";
         }
         return "otp";
+    }
+
+    @GetMapping("/ott")
+    public String ottPage(Authentication authentication) {
+        // Check if user has completed first factor
+        if (authentication == null ||
+                !authentication.getAuthorities().contains(new SimpleGrantedAuthority("PARTIAL_AUTH_T"))) {
+            return "redirect:/login";
+        }
+        return "ott";
     }
 
     @PostMapping("/verify-otp")
@@ -344,6 +388,27 @@ class AuthController {
             return "redirect:/";
         } catch (AuthenticationException e) {
             return "redirect:/otp?error";
+        }
+    }
+
+    @PostMapping("/verify-ott")
+    public String verifyOtt(@RequestParam String otp, HttpSession session, HttpServletRequest request,
+            HttpServletResponse response) {
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        String username = auth.getName();
+        try {
+            Authentication verified = ottAuthenticationProvider.authenticate(
+                    new UsernamePasswordAuthenticationToken(username, otp));
+            SecurityContextHolder.getContext().setAuthentication(verified);
+            // Retrieve the saved request
+            // SavedRequest savedRequest = requestCache.getRequest(request, response);
+            // if (savedRequest != null) {
+            // // Redirect to the original URL
+            // return "redirect:" + savedRequest.getRedirectUrl();
+            // }
+            return "redirect:/otp";
+        } catch (AuthenticationException e) {
+            return "redirect:/ott?error";
         }
     }
 }
