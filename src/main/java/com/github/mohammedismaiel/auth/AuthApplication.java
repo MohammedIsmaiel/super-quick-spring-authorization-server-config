@@ -1,12 +1,13 @@
 package com.github.mohammedismaiel.auth;
 
-import java.io.IOException;
+import java.time.LocalDateTime;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
-import java.util.Map;
+import java.util.List;
+import java.util.Optional;
 import java.util.Random;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 import org.springframework.boot.SpringApplication;
@@ -14,6 +15,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.annotation.Order;
+import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.http.MediaType;
 import org.springframework.security.authentication.AuthenticationProvider;
 import org.springframework.security.authentication.BadCredentialsException;
@@ -23,11 +25,12 @@ import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.AuthenticationException;
+import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
-import org.springframework.security.core.userdetails.User;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.core.userdetails.UsernameNotFoundException;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.oauth2.core.AuthorizationGrantType;
@@ -42,12 +45,11 @@ import org.springframework.security.oauth2.server.authorization.settings.Authori
 import org.springframework.security.oauth2.server.authorization.settings.ClientSettings;
 import org.springframework.security.oauth2.server.authorization.token.JwtEncodingContext;
 import org.springframework.security.oauth2.server.authorization.token.OAuth2TokenCustomizer;
-import org.springframework.security.provisioning.InMemoryUserDetailsManager;
 import org.springframework.security.web.SecurityFilterChain;
-import org.springframework.security.web.authentication.AuthenticationFailureHandler;
-import org.springframework.security.web.authentication.AuthenticationSuccessHandler;
 import org.springframework.security.web.authentication.LoginUrlAuthenticationEntryPoint;
 import org.springframework.security.web.savedrequest.HttpSessionRequestCache;
+import org.springframework.security.web.savedrequest.SavedRequest;
+import org.springframework.security.web.util.matcher.AntPathRequestMatcher;
 import org.springframework.security.web.util.matcher.MediaTypeRequestMatcher;
 import org.springframework.stereotype.Component;
 import org.springframework.stereotype.Controller;
@@ -60,11 +62,18 @@ import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
-import jakarta.servlet.ServletException;
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+import jakarta.persistence.Table;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import jakarta.servlet.http.HttpSession;
 import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.NoArgsConstructor;
 
 @SpringBootApplication
 public class AuthApplication {
@@ -72,15 +81,15 @@ public class AuthApplication {
         SpringApplication.run(AuthApplication.class, args);
     }
 
-    @Bean
-    UserDetailsService userDetailsService(PasswordEncoder passwordEncoder) {
-        UserDetails user = User.builder()
-                .username("user")
-                .password(passwordEncoder.encode("user"))
-                .roles("USER")
-                .build();
-        return new InMemoryUserDetailsManager(user);
-    }
+    // @Bean
+    // UserDetailsService userDetailsService(PasswordEncoder passwordEncoder) {
+    // UserDetails user = User.builder()
+    // .username("user")
+    // .password(passwordEncoder.encode("user"))
+    // .roles("USER")
+    // .build();
+    // return new InMemoryUserDetailsManager(user);
+    // }
 }
 
 @Configuration
@@ -112,42 +121,24 @@ class SecurityConfig {
             OtpAuthenticationProvider otpAuthenticationProvider) throws Exception {
         http
                 .authorizeHttpRequests(authorize -> authorize
-                        .requestMatchers("/error", "/assets/**").permitAll()
-                        .requestMatchers("/login").anonymous()
+                        .requestMatchers("/error", "/assets/**", "/logout").permitAll()
+                        .requestMatchers("/login/**").anonymous()
                         .requestMatchers("/otp", "/verify-otp").hasAnyAuthority("PARTIAL_AUTH")
-                        .anyRequest().authenticated())
-                .requestCache(requestCache -> requestCache
-                        .requestCache(new HttpSessionRequestCache() {
-                            @Override
-                            public void saveRequest(HttpServletRequest request, HttpServletResponse response) {
-                                String requestUrl = request.getRequestURL().toString();
-                                request.getSession().setAttribute("originalRequestUrl", requestUrl);
-                                super.saveRequest(request, response);
-                            }
-                        }))
+                        .anyRequest().hasAnyAuthority("ROLE_USER"))
                 .formLogin(form -> form
                         .loginPage("/login")
                         .loginProcessingUrl("/login")
                         .successHandler((request, response, authentication) -> {
-                            String redirectUrl = (String) request.getSession().getAttribute("originalRequestUrl");
-                            if (redirectUrl != null) {
-                                request.getSession().removeAttribute("originalRequestUrl");
-                            }
-                            response.sendRedirect("/otp");
-                        })
-                        .failureHandler((request, response, authentication) -> {
-                            String redirectUrl = (String) request.getSession().getAttribute("originalRequestUrl");
-                            if (redirectUrl != null) {
-                                request.getSession().removeAttribute("originalRequestUrl");
-                            }
                             response.sendRedirect("/otp");
                         })
                         .failureHandler((request, response, exception) -> {
                             response.sendRedirect("/login?error");
                         }))
+                .logout(logout -> logout.logoutUrl("/logout")
+                        .logoutRequestMatcher(new AntPathRequestMatcher("/logout", "GET")))
                 .authenticationProvider(usernamePasswordAuthProvider)
                 .authenticationProvider(otpAuthenticationProvider)
-                .csrf(csrf -> csrf.ignoringRequestMatchers("/login", "/verify-otp"))
+                .csrf(csrf -> csrf.ignoringRequestMatchers("/login", "/logout", "/verify-otp"))
                 .cors(Customizer.withDefaults());
         return http.build();
     }
@@ -158,7 +149,7 @@ class SecurityConfig {
     }
 
     @Bean
-    RegisteredClientRepository registeredClientRepository() {
+    RegisteredClientRepository registeredClientRepository(PasswordEncoder passwordEncoder) {
         RegisteredClient front = RegisteredClient.withId(UUID.randomUUID().toString())
                 .clientId("admin-front")
                 .clientSecret("{noop}front")
@@ -175,11 +166,11 @@ class SecurityConfig {
                 .build();
         RegisteredClient resource = RegisteredClient.withId(UUID.randomUUID().toString())
                 .clientId("resource")
-                .clientSecret("{noop}resource")
+                .clientSecret(passwordEncoder.encode("resource"))
                 .clientAuthenticationMethod(ClientAuthenticationMethod.CLIENT_SECRET_BASIC)
                 .authorizationGrantType(AuthorizationGrantType.AUTHORIZATION_CODE)
                 .authorizationGrantType(AuthorizationGrantType.REFRESH_TOKEN)
-                .redirectUri("http://localhost:5555/auth")
+                .redirectUri("https://spring.io")
                 .scope(OidcScopes.OPENID)
                 .scope("read")
                 .build();
@@ -217,23 +208,26 @@ class SecurityConfig {
 }
 
 @Service
+@AllArgsConstructor
 class OtpService {
-    private final Map<String, String> otpStore = new ConcurrentHashMap<>();
+    private final UserRepository userRepository;
+    private static final long OTP_VALID_DURATION = 5;
 
-    public String generateOtp(String username) {
+    public String generateOtp(User user) {
         String otp = String.format("%06d", new Random().nextInt(1000000));
-        otpStore.put(username, otp);
-        System.out.println("Generated OTP for " + username + ": " + otp); // For demo purposes
+        user.setOtp(otp);
+        user.setOtpGeneratedTime(LocalDateTime.now());
+        userRepository.save(user);
         return otp;
     }
 
-    public boolean validateOtp(String username, String otp) {
-        String storedOtp = otpStore.get(username);
-        if (storedOtp != null && storedOtp.equals(otp)) {
-            otpStore.remove(username); // One-time use
-            return true;
-        }
-        return false;
+    public boolean validateOtp(String username, String inputOtp) {
+        var user = userRepository.findByUsername(username).get();
+        if (user == null || user.getOtp() == null)
+            return false;
+        return user.getOtp().equals(inputOtp);
+        // &&
+        // LocalDateTime.now().isBefore(user.getOtpGeneratedTime().plusMinutes(OTP_VALID_DURATION));
     }
 }
 
@@ -243,6 +237,7 @@ class UsernamePasswordAuthenticationProvider implements AuthenticationProvider {
     private UserDetailsService userDetailsService;
     private OtpService otpService;
     private PasswordEncoder passwordEncoder;
+    private UserRepository userRepository;
 
     @Override
     public Authentication authenticate(Authentication authentication) throws AuthenticationException {
@@ -250,7 +245,7 @@ class UsernamePasswordAuthenticationProvider implements AuthenticationProvider {
         String password = authentication.getCredentials().toString();
         UserDetails user = userDetailsService.loadUserByUsername(username);
         if (user != null && passwordEncoder.matches(password, user.getPassword())) {
-            otpService.generateOtp(username);
+            otpService.generateOtp(userRepository.findByUsername(username).get());
             return new UsernamePasswordAuthenticationToken(
                     username,
                     password,
@@ -314,6 +309,7 @@ class DemoController {
 @AllArgsConstructor
 class AuthController {
     private OtpAuthenticationProvider otpAuthenticationProvider;
+    private final HttpSessionRequestCache requestCache = new HttpSessionRequestCache();
 
     @GetMapping("/login")
     public String loginPage() {
@@ -331,16 +327,89 @@ class AuthController {
     }
 
     @PostMapping("/verify-otp")
-    public String verifyOtp(@RequestParam String otp, HttpSession session) {
+    public String verifyOtp(@RequestParam String otp, HttpSession session, HttpServletRequest request,
+            HttpServletResponse response) {
         Authentication auth = SecurityContextHolder.getContext().getAuthentication();
         String username = auth.getName();
         try {
             Authentication verified = otpAuthenticationProvider.authenticate(
                     new UsernamePasswordAuthenticationToken(username, otp));
             SecurityContextHolder.getContext().setAuthentication(verified);
-            return "redirect:/oauth2/authorize";
+            // Retrieve the saved request
+            SavedRequest savedRequest = requestCache.getRequest(request, response);
+            if (savedRequest != null) {
+                // Redirect to the original URL
+                return "redirect:" + savedRequest.getRedirectUrl();
+            }
+            return "redirect:/";
         } catch (AuthenticationException e) {
             return "redirect:/otp?error";
         }
     }
+}
+
+@AllArgsConstructor
+@Component
+class CustomUserDetailsService implements UserDetailsService {
+    private final UserRepository userRepository;
+
+    @Override
+    public UserDetails loadUserByUsername(String username) throws UsernameNotFoundException {
+        return userRepository.findByUsername(username)
+                .orElseThrow(() -> new UsernameNotFoundException("User not found"));
+    }
+}
+
+@Data
+@NoArgsConstructor
+@Entity
+@Table(name = "users")
+class User implements UserDetails {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(unique = true, nullable = false)
+    private String username;
+
+    @Column(nullable = false)
+    private String password;
+
+    @Column
+    private String otp;
+
+    @Column
+    private LocalDateTime otpGeneratedTime;
+
+    @Column(nullable = false)
+    private String role = "ROLE_USER";
+
+    @Override
+    public Collection<? extends GrantedAuthority> getAuthorities() {
+        return List.of(new SimpleGrantedAuthority(role));
+    }
+
+    @Override
+    public boolean isAccountNonExpired() {
+        return true;
+    }
+
+    @Override
+    public boolean isAccountNonLocked() {
+        return true;
+    }
+
+    @Override
+    public boolean isCredentialsNonExpired() {
+        return true;
+    }
+
+    @Override
+    public boolean isEnabled() {
+        return true;
+    }
+}
+
+interface UserRepository extends JpaRepository<User, Long> {
+    Optional<User> findByUsername(String username);
 }
